@@ -1,8 +1,5 @@
 # Predictive bikeshare rebalancing
 
-<a href="http://divvybikes.com/"><img src="http://dssg.io/img/partners/divvy.jpg" align="left"></a>
-<a href="http://www.cityofchicago.org/city/en/depts/cdot.html"><img src="http://dssg.io/img/partners/cdot.jpg" align="left"></a>
-
 Statistical models and app for predicting when bikeshare stations will be empty or full in Washington DC and someday Chicago. 
 
 ## The problem: bikeshare rebalancing
@@ -23,9 +20,7 @@ Specifically, we take the current time of day, day of week, month, and weather a
 
 <a href="http://bikeshare.dssg.io"><img src="https://raw.github.com/dssg/bikeshare/master/for_wiki/webapp_screenshot.png" align="center"></a>
 
-We do this for every station in DC's bikeshare system, and display the resulting predictions in a [human-friendly web app](http://bikeshare.dssg.io).
-
-**[Read more about our statistical model in the wiki](../../wiki/methodology)**
+We do this for every station in DC's bikeshare system, and display the resulting predictions in a [human-friendly web app]
 
 ## The data: real-time bikeshare station availability and weather
 
