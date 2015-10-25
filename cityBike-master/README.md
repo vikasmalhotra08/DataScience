@@ -1,2 +1,4 @@
 # cityBike
 This project is geared towards understanding the Citi's Bike Share program and the statistical models around the program. 
+City Bike data were downloaded from the City Bike website in csv format in February 2014. These data set is divided in 18 csv, one for each month from July 2013 to December 2014. The data were processed in R, the full code is in github. Briefly the time a bike stayed docked at a station was extracted and binned in 10 minute bin for each day of the week. One model has been created for each month of the year. After extraction, a boosted tree model (gbm) was run to try to predict whether at least a bike would be present at a given station. Th accuracy of the model is relatively good, however, it is a lot more accurate to predict that at least a bike would be present than to predict there would be no bikes.
+
