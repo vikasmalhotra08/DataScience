@@ -9,4 +9,3 @@ Alta's real-time bike APIs only publish current bike availability data, not hist
 
 - `models.py` is an work in progress. Eventually, it should be [SQLAlechemy](http://www.sqlalchemy.org/) models this database to make it easier to use.
 
-Please see the [data section of the Wiki](https://github.com/dssg/bikeshare/wiki/data) for more information.

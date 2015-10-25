@@ -8,4 +8,3 @@ This directory contains scrapers for each of the APIs we use to get data.
 
 - `crontab.example` is an example version of the crontab we use to run these scrapers continously and keep our database up to date.
 
-More info can be found in the [data section of the wiki](https://github.com/dssg/bikeshare/wiki/data).
