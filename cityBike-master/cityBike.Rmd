@@ -1,0 +1,716 @@
+---
+title: "Predicting the presence of bikes in each Bike share station NYC"
+output: html_document
+---
+<style type = 'text/css'>
+#imgleft img{
+  float:left;
+  margin-right: 2em;
+  margin-bottom: 2em;
+}
+img{
+  margin-left:auto;
+  margin-right:auto;
+  display:block;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+```{r, echo=FALSE}
+options(warn=-1)
+```
+<div id = 'imgleft'>
+![bike](bike.png)
+</div>
+The bike share system was first invented in 1965 by Luud Schimmelpennink in Amsterdam, the bike were free to use and they quickly got all stolen. A few other systems have been tried over the year and often closed because the bikes were also stolen. The introduction of the smart technology to track the bikes allowed the development of these share systems. The first modern bike share system was introduced in Portsmouth (England) in 1995 (http://en.wikipedia.org/wiki/Bicycle_sharing_system). 
+
+## Visualisation of the development of the bike sharing system
+### Getting the data
+To visualize the growth of the bike sharing system, I scraped the [wikipedia table](http://en.wikipedia.org/wiki/List_of_bicycle_sharing_systems) containing the location and opening date of every bike share program in the world at the exception of the Netherlands systems (I presume because their is so many). 
+
+After downloading the data, I used the geocode function to obtain the coordinate of the cities for each system. I extracted the year when the system began (or is planed to) and whether the system is closed or still running. After cleaning the data, I created an index corresponding to the number of year between the first system and the last that will be use to create the animation and made this index correspond to each year. Finally, I save these data to use for the animation.
+```{r, eval=FALSE}
+library(XML)
+library(ggmap)
+
+web <- 'http://en.wikipedia.org/wiki/List_of_bicycle_sharing_systems'
+tables <- readHTMLTable(web, stringsAsFactors = FALSE)
+tb <- tables[[1]]
+
+cities <- paste(tb$City, tb$Country, sep =',')
+cities <- cities[-c(346,347)]
+coord <- geocode(cities, output = 'latlon')
+head(coord)
+cities <- data.frame(cities, coord)
+tb <-    tb[-c(346:347),]
+cities <- data.frame(cities, status = tb$Status, year = tb$Year, station = tb$Stations, bike = tb$Bicycles)
+
+cities$year <- as.character(cities$year)
+get_year.f <- function(x){
+  y <- substring(x, nchar(x)-3, nchar(x))
+  return(y)
+}
+
+year <- sapply(cities$year, get_year.f)
+cities$year <- year
+
+cities$status <- as.character(cities$status)
+cities$closedyear <- ifelse(grepl('Closed', cities$status), substring(cities$status, (nchar(cities$status)-4), (nchar(cities$status) -1)), NA)
+cities$status[grep('Closed', cities$status)] = 'closed'
+
+#need some cleaning
+cities <- cities[-c(352,353),]
+cities$year[which(cities$year == '974)')] = 2010
+cities$year[which(cities$year == '237]')] = 2009
+cities$year[which(cities$year == 'lot)')] = 2011
+cities$year[which(cities$year == '006)')] = 2006
+cities$status[which(cities$status == '  ?' | cities$status == 'Inactive')] = 'closed'
+cities$status[which(cities$status == 'On Hold' | cities$status == 'Was due to open April 2013')] = 'Planned'
+
+##create an index for the animation
+rg <- max(cities$year, na.rm = TRUE) - min(cities$year, na.rm = TRUE) + 1
+dates <- data.frame(year = min(as.numeric(cities$year), na.rm = TRUE):max(as.numeric(cities$year), na.rm = TRUE), idx = 1:rg)
+
+cities <- left_join(cities, dates)
+save(dates, file = 'dates')
+cities$idx[is.na(cities$idx)] = max(cities$idx, na.rm = TRUE)
+save(cities, file = 'bikeshareCities')
+```
+
+### Animation
+
+The bike share system is developing first in Europe and then around the world, which is why I wanted the first part of my animation to be centered in Europe while the last part shows the world. I used the maps package, because ggmap seems to have a problem to show a good map of the world, the zoom = 1 does not zoom enough while zoom = 2 zooms to much. 
+
+I chose to use 3 colors showing the status of a given share system: yellow for running, red for closed and green for planning. The index created previously is used to loop through the years. I while looking at the data set, I saw that the first year where a new bike share system was created outside of Europe was 2008 so I chose to change the map from the Europe map to the World map at that moment.  The animation is saved in html which make it easy to share.
+
+```{r, eval=FALSE}
+library(dplyr)
+library(maps)
+library(ggplot2)
+library(animation)
+
+load('bikeshareCities')
+load('dates')
+mapWorld <- borders("world", colour="gray50", fill="gray50")
+latw <- c(-70, 90) 
+longw <- c(-160, 160) 
+mp <- NULL
+mp <- ggplot() + mapWorld 
+latlimits <- c(30, 65) 
+longlimits <- c(-20, 50) 
+ep <- NULL
+ep <- ggplot() + mapWorld
+
+oopt = ani.options(interval = 0.3)
+bike_animation = function(){
+  for (i in 1:max(cities$idx)){
+    init <- cities %>% filter(idx <= i)
+    year <- dates$year[which(dates$idx == i)]
+    if(year <= 2007){
+      print(ep + coord_cartesian(xlim = longlimits, ylim = latlimits) + geom_point(data = init, aes(x = lon, y = lat, size = bike, colour = status))+ geom_text(aes(x = 42, y = 32), label = year, colour = 'yellow', size = 10)+
+        scale_colour_manual(values = c("yellow","red", "green"))+
+      theme(
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        panel.background = element_rect('#00FFFF'),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none"
+      ))
+    }else{
+      print(mp + coord_cartesian(xlim = longw, ylim = latw) + geom_point(data = init, aes(x = lon, y = lat, size = as.numeric(bike), colour = status))+ 
+              geom_text(aes(x = 130, y = -55), label = year, size = 10)+
+              scale_colour_manual(values = c("yellow","red", "green"))+scale_size(range = c(0, 3))+
+              theme(
+                axis.text = element_blank(),
+                axis.ticks = element_blank(),
+                axis.title = element_blank(),
+                panel.background = element_rect('#00FFFF'),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                legend.position = "none"
+              )
+        )
+    }
+    animation::ani.pause()
+  }
+}
+saveHTML(bike_animation(), autoplay = FALSE, loop = FALSE, verbose = TRUE, outdir = "images", htmlfile ='share.html', ani.height = 500, ani.width = 800,  single.opts = "'controls': ['first', 'previous', 'play', 'next', 'last', 'loop', 'speed'], 'delayMin': 0")
+```
+
+<iframe src = 'https://dl.dropboxusercontent.com/u/18128908/bikeShareAnimation/index.html' width = 900 height = 570 style = "border = none;"" seamless = 'seamless' frameborder = 'no' scrolling = 'no'></iframe>
+
+## Data Wrangling
+### Downloading the city bike data
+I downloaded the zip files containing the data from the [city bike website](http://www.citibikenyc.com/system-data), saved them in a folder named raws, unziped them in the same folder and then delete the zip file.
+```{r,eval=FALSE}
+library(RCurl)
+library(XML)
+
+get_data.f <- function(l){
+  folder <- './raws'
+  dir.create(file.path(folder), showWarnings = FALSE)
+  for(i in 1:length(links)){
+    x <- links[i]
+    filename <- paste(folder, strsplit(x, '/')[[1]][5], sep = '/')
+    download.file(url = x,destfile = filename, method = "wget")
+    unzip(filename, exdir = "./raws")
+    file.remove(filename)
+  }  
+}
+
+script <- getURL('http://www.citibikenyc.com/system-data')
+doc <- htmlParse(script)
+links <- getHTMLLinks(doc)
+links <- links[grepl('zip', links)]
+lapply(links, get_data.f)
+```
+
+### Clean the data and add variables
+This code loop through the csv file, load them and renamed the columns. In the first iteration of the loop, I calculate the distance between each station using the distm function from the geosphere package. 
+I then add these distances in the main data in order to calculate the speed of the bike (it is important to note that it is the maximum speed possible as the distance calculated is a straight line between two station while the bike is not going along this straight line as illustrated in the figure below: the distance between 2 stations is represented by the black arrow, while 3 possible bike path are represented in yellow, purple and pink).
+![bike path](distance.png)
+
+I extract the date and time, put them in a date format and extract the month, day, hour min, second and day of week. I also calculate the length each bike stays in a given station.
+
+Finally I add Boolean flag to indicate if the bike speed is too fast to be possible, if the start time is during the night (between 9 PM and 6 AM), the weekend or rush hour (7 to 9 AM and 5 to 7 PM).
+```{r, eval=FALSE}
+library(plyr)
+library(dplyr)
+library(geosphere)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(gbm)
+library(caret)
+dir.create(file.path('./data'), showWarnings = FALSE)
+db <- list.files('raws')
+for(i in 1:length(db)){
+  n <- db[i]
+  df <- fread(n)
+  n <- strsplit(n, '[.]')[[1]][1]
+  
+  setnames(df, c('duration', 'starttime', 'stoptime', 'startid', 'startname', 'startlat', 'startlon', 'endid', 'endname', 'endlat', 'endlon', 'bikeid', 'usertype', 'birth', 'gender'))
+  
+  #get a matrix of the distance between stations
+  if(i == 1){
+    station <- df %>% distinct(startid) %>% dplyr::select(as.numeric(startlon), as.numeric(startlat))
+    station <- as.matrix(station)
+    station <- apply(station, 2, as.numeric)
+    dist <- distm(station,  station)
+    rownames(dist) <- colnames(dist) <- unique(df$startid)
+    dist <- as.data.frame(dist)
+    dist$startid <- rownames(dist)
+    mdist <- melt(dist, id = 'startid', variable.name = 'endid', value.name = 'dist')
+    mdist$endid <- as.character(mdist$endid)
+  }
+  #get the distance from the station matrix and match it to the travels
+  df <- as.data.frame(df)
+  df <- left_join(df, mdist)
+  
+  df$speed<- df$dist/as.numeric(df$duration)  
+  
+  #extract year month day hour min sec from date    
+  dates <- as.data.frame(do.call(rbind,strsplit(as.character(df$starttime), ' ')))
+  names(dates) <- c('dates', 'times')
+  d <- do.call(rbind,strsplit(as.character(dates$dates), '-|/'))
+  
+  if(grepl('/',dates$dates[1])){
+    #the last data have a different format for the date so need to transform them
+    d <- d[,c(3,1,2)]
+    df$starttime <-  mdy_hms(df$starttime)
+    df$stoptime <-  mdy_hms(df$stoptime)
+  }else{
+    df$starttime <- ymd_hms(df$starttime)
+    df$stoptime <- ymd_hms(df$stoptime)    
+  }
+  
+  ti <- do.call(rbind,strsplit(as.character(dates$times), ':'))
+  cut_date <- data.frame(d,ti)
+  cut_date <- sapply(cut_date, function(x) as.numeric(as.character(x)))
+  
+  colnames(cut_date) <- c('year', 'month', 'day', 'hour', 'min', 'sec')
+  
+  df$dayofweek <- format(as.Date(as.character(dates[,1])), '%a')
+  bike <- data.frame(df, cut_date)
+  rm(df); rm(dates); rm(d); rm(ti); rm(cut_date) 
+
+  df <- data.frame(bikeid = bike$bikeid, stoptime = bike$stoptime, starttime = bike$starttime)
+  b <- df %>% group_by(bikeid) %>% dplyr::mutate(stay = difftime(stoptime,lead(starttime)))
+  b$bikeid <- as.character(b$bikeid)
+  bike <- left_join(bike, b, by = c('bikeid', 'stoptime'))
+  bike$idx1 <- substring(n, 1,7)
+  bike$idx2 <- 1:dim(bike)[1]
+  bike$toofast <- ifelse(bike$speed > 6, TRUE, FALSE)
+  bike$weekend <- ifelse(bike$dayofweek %in% c('Sat', 'Sun'), TRUE, FALSE)
+  bike$rush <- ifelse(bike$hour %in% c(7,8,9, 17, 18, 19) & bike$weekend == FALSE, TRUE, FALSE)
+  bike$night <- ifelse(bike$hour %in% c(21:23,0:6), TRUE, FALSE)
+  
+  save(bike, file = paste('data/',n, sep =''))
+}
+
+```
+
+### Create the training and test set
+To create the training and test sets, I loop through all the monthly data set and use the createDataPartition to have balanced sets in terms of bike stations. The sets are thus balanced for both months and stations. I saved them for each month and then bind them together.
+```{r, eval=FALSE}
+dir.create(file.path('train'), showWarnings = FALSE)
+dir.create(file.path('test'), showWarnings = FALSE)
+
+df <- list.files('data')
+create_train.f <- function(x){
+  load(paste0('data/',x))
+  idxtrain <- createDataPartition(bike$endid, list = FALSE)
+  train <- bike[idxtrain,]
+  test <- bike[-idxtrain,]
+  save(train, file = paste('train/',x, sep =''))
+  save(test, file = paste('test/',x, sep =''))
+}
+lapply(df, create_train.f)
+
+create_df.f <- function(nm){
+  if(nm == 'train'){
+    train <- lapply(list.files(nm), function(x) {load(paste0(nm, '/',x)); return(train)})
+    train <- do.call(rbind, train)
+    save(train, file = paste0(nm, '/', nm))
+  }else{
+    test <- lapply(list.files(nm), function(x) {load(paste0(nm, '/',x)); return(test)})
+    test <- do.call(rbind, test)
+    save(test, file = paste0(nm, '/', nm))
+  }
+}
+create_df.f('train')
+create_df.f('test')
+```
+### Exploring the data
+The train data set is used to explore the data and do some visualization.
+The user of the city bike system are mostly subscriber and mostly men; the bike usage is the same throughout the week and is a bit lower during the weekend.
+
+```{r, echo=FALSE}
+load('dataPres')
+```
+User type:
+```{r, echo=FALSE}
+table(train$usertype)
+```
+
+Gender:
+```{r, echo=FALSE}
+table(train$gender)
+```
+
+
+Day of Week:
+```{r, echo=FALSE}
+table(train$dayofweek)
+```
+
+Speed
+```{r, echo=FALSE}
+quantile(train$speed, na.rm=T)
+```
+The speed quantile maximum clearly shows that some speed are impossible the maximum is `r quantile(train$speed, na.rm=T)[5]*3.6` m/sec = `r quantile(train$speed, na.rm=T)[5]*3.6` km/hour.
+
+Trip duration:
+```{r, echo=FALSE}
+quantile(as.numeric(train$duration)/60, na.rm=T)
+```
+
+Length of stay in a station:
+```{r, echo=FALSE}
+quantile(as.numeric(train$stay), na.rm=T)
+```
+Looking at the stay length we see `r length(which(train$stay < 0))` negative numbers indicating more issues in the data set. These data were removed from the data before modeling.
+
+
+I sampled 10 % of the training data to be able to visualize them using the createDataPartiton from the caret package on the stay variable.
+```{r, echo=FALSE}
+library(ggplot2)
+options(warn=-1)
+load('forPlotblog')
+theme_set(theme_bw())
+new_theme = theme_update(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+                         #panel.border = element_border.f(c("left","bottom")),
+                         plot.title = element_text(face="bold", size=16), 
+                         axis.title.x = element_text(size=16),
+                         axis.title.y = element_text(size=16, angle=90),
+                         axis.text.y = element_text(size=14),
+                         axis.text.x = element_text(size=14),
+                         legend.title = element_blank(), # switch off the legend title
+                         legend.text = element_text(size=16),
+                         legend.key = element_blank() # switch off the rectangle around symbols in the legend
+)
+ggplot(data = mp, aes(value, colour = dayofweek)) + geom_density(lwd=2)+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)') + labs(title = 'Day of the week influence on lenght of stay')
+
+ggplot(data = mp, aes(value, colour = as.factor(hour))) + geom_density(lwd=2)+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)')+ labs(title = 'Hour of the day influence on lenght of stay')
+
+ggplot(data = mp, aes(value, colour = endid)) + geom_density()+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)') + labs(title = 'Station influence on lenght of stay') + theme(legend.position = "none")
+```
+
+### Binned the time a bike spend in a station
+
+The main function takes the train or test data set and extract the month, day, hour, min and day of week of the beginning of the stay period for each bike. it calls the function is_in.f (see below) to binned the extract whether a bike is in a station at a given time in 10 min bins. 
+
+I add the Boolean weekend, rush hour and night to the data and group the data per month, day, hour and count the number of bike for each station for each time. Then the data are grouped by day of week in order to decrease the volume of the data and the number of bike are averaged per station and time.
+```{r, eval=FALSE}
+to_station.f <- function(train, n){
+  train$stay <- as.numeric(train$stay)
+  train  <- train[-which(train$stay < 0),]
+  instat <- train %>% select(endid, stoptime, bikeid, dayofweek, stay)
+  instat <- instat %>% mutate(year = year(stoptime), month = month(stoptime), day = day(stoptime), hour = hour(stoptime), min = minute(stoptime), dayofweek = format(train$stoptime, '%a'))
+  instat <- instat[!is.na(instat$stay),]
+  
+  station <- is_in.f(instat, 10, 3)
+  station$weekend = ifelse(station$dayofweek %in% c('Sat', 'Sun'), TRUE, FALSE)
+  station$rush = ifelse(station$hour %in% c(7,8,9, 17, 18, 19) & station$weekend == FALSE, TRUE, FALSE)
+  station$night = ifelse(station$hour %in% c(21:23,0:6), TRUE, FALSE)
+  
+  st <- apply(station[,c(1,3,6,7,9)], 2, as.numeric)
+  station <- data.frame(station[,c(4,5,8,10:19)], st)
+  mst <- melt(station, id = c(1:7, 14:18), variable.name = 'min_block')  
+ 
+  dmst <- mst %>% group_by(endid, month,day, dayofweek, hour, rush, night, weekend, min_block) %>% dplyr::summarise(count = n(), nbike = sum(value)) 
+  gmst <- dmst %>% group_by(endid, month,hour,  rush, night, weekend, min_block, dayofweek) %>% dplyr::summarise(nday = n(), avgbike = round(mean(nbike)))
+    
+  gmst$endid <- as.factor(gmst$endid)
+  gmst$dayofweek <- as.factor(gmst$dayofweek)
+  t <- apply(gmst[,4:6], 2, as.numeric)
+  gmst[,4:6] <- t
+  
+  return(gmst)
+}
+
+load('train/train')
+gmst <- to_station.f(train, 6)
+save(gmst, file = 'train/train_station')
+
+load('test/test')
+gmst_test <- to_station.f(test, 6)
+save(gmst_test, file = 'test/test_station')
+```
+
+The is_in.f function as for goal to bin the stay time in tm minute bin. First, I took all the rows were the sum of the minute (min) when the bike first arrived in the station (for example if the bike arrived at 10:42, min = 42) and the stay is more than 60 min (for example 30) and convert these rows in two rows, one beginning at the original time (here 42) with a stay time of 60 - 42 = 18 and one beginning at min = 0 and having the stay = original stay - 18 = 12.
+
+Then I take all the rows where the stay time is more than 1440 (more than a day) and call the change\_days.f function to add rows for each extra day of stay in a station. I do the same with the change\_hours.f function for each stay time more than 60 (see below).
+
+After these modification the stay time on each row is less than 60 min and can thus be binned. 
+
+```{r, eval=FALSE}
+is_in.f <- function(instat, tm, n){
+  # this function binned the stay time in tm min (i used 10 min) but needs to add lines for extra days and hours first. 
+  s <- seq(0,60-tm,tm)
+  names <- paste(s,'+', tm, sep = '')  
+  instat$stay <- round(instat$stay)
+  
+  #change if time bef/ginning in the station +stay > 60 min (so need to change min and add a line....)
+  toolong <- instat[which((instat$stay + instat$min )> 60),]
+  instat_cut <- instat[-which((instat$stay + instat$min )> 60),]
+  toolong2 <- toolong
+  toolong$stay <- with(toolong,  60 - toolong$min)
+  toolong2$stay <- toolong2$stay - toolong$stay
+  toolong2$min <- 0
+  instat_cut <- rbind(instat_cut, toolong, toolong2)
+  
+  #more than a day
+  toolong <- instat_cut[which(instat_cut$stay > 1440),]
+  instat_cut <- instat_cut[-which(instat_cut$stay > 1440),]
+  registerDoParallel(cores=n)
+  tl <- foreach(i = 1:nrow(toolong), .combine = rbind) %dopar%{
+    change_days.f(toolong[i,])
+  }
+  instat_cut$stoptime <- as.character(instat_cut$stoptime)
+  instat_cut <- rbind(instat_cut, tl)
+  
+  toolong <- instat_cut[which(instat_cut$stay > 60),]
+  instat_cut <- instat_cut[-which(instat_cut$stay > 60),]
+
+  registerDoParallel(cores=n)
+  system.time(
+    tl <- foreach(i = 1:nrow(toolong), .combine = rbind) %dopar%{
+      change_hour.f(toolong[i,])
+    })
+  instat_cut <- rbind(instat_cut, tl)  
+  
+  is_in <- matrix(0, dim(instat_cut)[1], length(names))
+  instat_cut$stay <- as.numeric(instat_cut$stay)
+  instat_cut$min <- as.numeric(instat_cut$min)
+  nyes <- round(instat_cut$stay/tm)  
+  begin <- round(instat_cut$min/tm)
+  begin[which(begin == 6)] = 5
+  e <- begin + nyes
+  f <- begin+1
+  change <- which(f>e)
+  e[change] <- 0
+  f[change] <- 0
+  for(i in 1:dim(is_in)[1]){        
+    is_in[i, (f[i]):(e[i])] = 1
+  }
+  colnames(is_in) <- names
+  instat_cut <- data.frame(instat_cut, is_in)
+  
+  return(instat_cut)  
+}
+```
+
+The two functions change\_days.f and change\_hours.f are similar. They take a vector of data, look at how many more rows needs to be created, create a data frame from by replicating imputed vector and change the value of the day, stay, day of week, hour, month as needed in the newly created rows.
+```{r, eval=FALSE}
+change_days.f <- function(t){
+  # this function takes a stay that is longer than a day and adds as many line as necessary to have a stay <= 1440. Adding a line means adding a day in the data where the given bike is at the given station.
+  days = c('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+  nr <- t$stay %/% 1440
+  extra <- ifelse(t$stay%%1440 != 0, 1, 0)
+  y <- as.data.frame(matrix(t, nrow = nr+extra, ncol = 10, byrow = TRUE))
+  names(y) = names(t)
+  y$stay[1:nr] <- 1440
+  if(extra == 1){y$stay[(nr+extra)] <- t$stay%%60}
+  y$day <- unlist(y$day) + 0:(dim(y)[1]-1)
+  nday <- which(days == t$dayofweek)+0:(dim(y)[1]-1)
+  while(any(nday > 7)){
+    nday[which(nday > 7)] <- nday[which(nday > 7)] - 7
+  }
+  y$dayofweek <- days[nday]
+  y$month[which(y$day > days_in_month(t$month))] <- unlist(y$month[which(y$day > days_in_month(t$month))]) +1
+  return(y)
+}
+
+change_hour.f <- function(x){
+  # this function takes a stay that is longer than an hours and adds as many line as necessary to have a hour <= 60. Adding a line means adding an hour in the data where the given bike is at the given station.
+  days = c('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+  x$stay <- as.numeric(x$stay)
+  nr <- x$stay%/%60
+  extra <- ifelse(x$stay%%60 != 0, 1, 0)
+  y <- as.data.frame(matrix(x, nrow = nr+extra, ncol = 10, byrow = TRUE))
+  names(y) = names(x)
+  y$stay[1:nr] <- 60
+  if(extra == 1){y$stay[(nr+extra)] <- x$stay%%60}
+  y$hour <- unlist(y$hour) + 0:(dim(y)[1]-1)
+  y$day[which(y$hour > 23)] <- unlist(y$day[which(y$hour > 23)]) + 1
+  y$dayofweek[which(y$hour > 23)] <- days[which(days == x$dayofweek)+1]
+  y$hour[which(y$hour > 23)] <- y$hour[which(y$hour > 23)] - 24
+  return(y)
+}  
+
+```
+
+With the data binned, a new variable called value is created with a value of 0 if no bikes are at the station in the time bin and 1 if at least one bike is at the station.
+
+```{r,eval=FALSE}
+
+create_binary_y.f <- function(df){
+  gmstbin <- df %>% mutate(value = ifelse(avgbike >=1, 1,0))
+  gmstbin <- gmstbin[,-c(9,10)]
+  return(gmstbin)
+} 
+
+load('train/train_station')
+gmstbin <- create_binary_y.f(gmst)
+save(gmstbin, file = 'train/train_bin')
+
+load('test/test_station')
+gmstbin_test <- create_binary_y.f(gmst_test)
+save(gmstbin_test, file = 'test/test_bin')
+
+```
+
+## Model 
+Because the data were so big, I decided to fit a different model for each month. Even like that, the data were still big and I could not fit models over a grid. However, I tried several values for the number of trees, interaction depth and shrinkage and it seems that overall 500 trees with a shrinkage of 0.01 and an interaction depth between 7 and 9 is a good choice.
+
+```{r,eval=FALSE}
+load('train/train_bin')
+load('test/test_bin')
+cmat <- list()
+rmse <- vector()
+monthFit <- list()
+for(i in 1:12){
+  mth <- gmstbin %>% filter(month == i)
+  mth <- mth[,-2]
+  set.seed(97)
+  gbmFit <- gbm(formula = value ~ .,            
+                distribution = "bernoulli", 
+                data = mth,
+                n.trees = 500,              
+                interaction.depth = 9,     
+                shrinkage = 0.1,           
+                verbose = FALSE,
+                cv.folds = 10,
+                n.cores = 4)           
+
+  mtht <- gmstbin_test %>% filter(month == i)
+  mtht <- mtht[,-2]
+  gbmPred <- predict(gbmFit, newdata = mtht, n.trees = 500, type = "response")
+  gbmPred <- ifelse(gbmPred > .5, 1, 0)
+  
+  cmat[[i]] <- confusionMatrix(gbmPred, mtht$value)
+  rmse[i] <- sqrt(mean((mtht$value - gbmPred)^2))
+  monthFit[[i]] <- gbmFit
+  print(i)
+}
+save(monthFit, file = 'monthFit')
+save(rmse, file='rmse_month')
+save(cmat, file = 'month_confmat')
+```
+
+The results of the models are not great. The models are good from may to October but bad for the winter month.... 
+
+The prediction table for each month is here:
+```{r, echo=FALSE}
+load('month_confmat')
+lapply(cmat, '[[', 'table')
+```
+
+## Shiny app
+
+The best way to see the prediction is through a shiny app. In this app the user can select a date and a time and see the probability for each station to have at least one bike.
+
+I used the leaflet-shiny package created by [Joe Cheng](https://github.com/jcheng5/leaflet-shiny/tree/master/) to create the map.
+
+```{r, eval=FALSE}
+library(shiny)
+library(leaflet)
+library(ShinyDash)
+library(markdown)
+
+shinyUI(navbarPage(title = "City Bike NYC",
+  collapsible = TRUE,
+  windowTitle <- 'CityBike',
+
+  tabPanel("About",
+    fluidRow(
+      column(6,offset = 3,
+        includeMarkdown("doc/about.md"))
+    )),  
+    tabPanel("Map",
+               column(3,
+                      wellPanel(
+                        dateInput('date', label = 'Select a date'),
+
+                        selectInput('hour', label = 'Select an hour',
+                                    choices = c('1','2',"3",'4','5',"6",'7','8','9','10','11','12','13','14','15','16','17','18','19',"20",'21','22','23', '0'),
+                                    selected = '12', width = '100%'),
+
+                        sliderInput('time',  label = 'Select a time range',
+                                    min = 0, max = 60, value = c(0,10), step = 10)
+                                )
+                      ),
+               column(9, 
+                      leafletMap(
+                        "map", "100%", 800,
+                        initialTileLayer = "//{s}.tiles.mapbox.com/v3/slardeux.lda667h9/{z}/{x}/{y}.png",
+                        initialTileLayerAttribution = HTML('Maps by <a href="http://www.mapbox.com/">Mapbox</a>'),
+                        options=list(center = c(40.736, -73.99), zoom = 14)
+                                )
+                      )   
+
+    ) #end tabPanel  
+  )
+)
+```
+
+When the user select a date and time, the app get them and use the get\_data.f function to find the prediction. This function calls the get\_bin.f function and the get\_all.f function (in the case when more than 1 10 minute bin was selected). These function return a data set composed of all the bike station ID, the date and the time; this data set will be use for prediction.
+
+The get\_data.f use the monthFit model obtained by running the gbm previously to predict the new data set. Finally, I created a map and added circle to each station location with a color green if the model predict that there is at least a bike and red if not.
+
+```{r, eval=FALSE}
+library(shiny)
+library(maps)
+library(lubridate)
+library(gbm)
+
+station <- read.csv('data/station.csv')
+station <- apply(station, 2, as.numeric)
+station <- as.data.frame(station)
+load('data/monthFit')
+
+###########################################################################################################
+## Create the data to predict
+#########################################################################################################
+get_bin.f <- function(df, date, hour, rng){
+  newd <- data.frame(month = month(date), hour = as.numeric(hour), dayofweek = format(date, '%a'), min_block = rng)
+  newd$weekend <- ifelse(newd$dayofweek %in% c('Sat', 'Sun'), 1, 0)
+  newd$rush <- ifelse(newd$hour %in% c(7,8,9, 17, 18, 19) & newd$weekend == 0, 1, 0)
+  newd$night <- ifelse(newd$hour %in% c(21:23,0:6), 1, 0)
+  newd <- newd[,c(1:3,6:7,5,4)]
+  newdata <- data.frame(endid = df$id, newd)
+  return(newdata)
+}
+get_all.f <- function(df, date, hour, rng, tm, len){
+  s <- seq(tm[1], tm[2], 10)
+  l <- list()
+  for(i in 1:len){
+    r <- paste0('X', s[i], '.', s[i+1])
+    l[[i]] <- get_bin.f(df, date, hour, r)
+  }
+  df <- data.frame(do.call(rbind, l))
+  return(df)
+}
+
+##################################################################################
+# Main function to get the data to predict and the prediciton to plot
+#####################################################################################
+
+get_data.f <- function(df, date, hour, tm){
+  nbin <- (tm[2] - tm[1])/10
+  rng  <- paste0('X',tm[1], '.', tm[2])
+    if(nbin == 1){
+      newdf <- get_bin.f(df, date, hour, rng)
+    }else{
+      newdf <- get_all.f(df, date, hour, rng,tm, nbin)
+    }
+  mn <- as.numeric(month(date))
+  fit <- monthFit[[mn]]
+  p <- predict(fit, newdata = newdf, n.trees = 500, type = "response")
+  pred <- ifelse(p > .5, 1, 0)
+  res <- data.frame(station, p = pred)
+  return(res)
+}
+
+shinyServer(function(input, output, session) {
+
+
+  ####################################################################################
+  ## create map
+  #####################################################################################
+  
+  map <- createLeafletMap(session, 'map')
+  add_circle.f <- function(df, col){
+    map$addCircle(
+      df$lat,
+      df$lon,
+      50,
+      row.names(df),
+      list(
+        weight=1.2,
+        fill=TRUE,
+        color= col,
+        fillOpacity = 0.5
+      )
+    )
+  }
+
+  observe({
+    map$clearShapes()
+    stat <- get_data.f(station, input$date, input$hour, input$time)
+    
+    if (nrow(stat) == 0)
+      return()
+    #add circle on the map
+      stat1 <- stat[which(stat$p == 1),]
+      add_circle.f(stat1, '#00FCA0')
+    
+      stat0 <- stat[which(stat$p == 0),]
+      add_circle.f(stat0, '#FC0000')
+  })
+  
+})
+```
+
+The app has also an about page (a markdown document) to explain how to use it and where it came from. The user needs to first chose a date/time before any point are drawn on the map.
+
+<iframe src = 'https://slardeux.shinyapps.io/citybikeApp/' width = 900 height = 800 style = "border = none;"" seamless = 'seamless' frameborder = 'no' scrolling = 'no'></iframe>
+
+
+
+
