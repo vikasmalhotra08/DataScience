@@ -1,0 +1,617 @@
+---
+title: "Citi Bike Data Exploration and Modelisation"
+author: "Sylvie"
+output: html_document
+---
+<style type = 'text/css'>
+body{
+  background:#DAFFD9;
+}
+#imgleft img{
+  float:left;
+  margin-right: 2em;
+  margin-bottom: 2em;
+}
+img{
+  margin-left:auto;
+  margin-right:auto;
+  display:block;
+}
+</style>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+```{r, echo=FALSE}
+options(warn=-1)
+```
+<div id = 'imgleft'>
+![bike](bike.png)
+</div>
+
+The goal of this project was to explore the New York City bike share system and to try to predict the presence of at least one bike at each bike station at a given day and time.
+
+## Data Wrangling
+### Downloading the Citi Bike data
+
+I downloaded the zip files containing the data from the [Citi Bike website](http://www.citibikenyc.com/system-data), saved them in a folder named raws, unzipped them in the same folder, and then deleted the zip file.
+
+```{r,eval=FALSE}
+library(RCurl)
+library(XML)
+
+get_data.f <- function(l){
+  folder <- './raws'
+  dir.create(file.path(folder), showWarnings = FALSE)
+  for(i in 1:length(links)){
+    x <- links[i]
+    filename <- paste(folder, strsplit(x, '/')[[1]][5], sep = '/')
+    download.file(url = x,destfile = filename, method = "wget")
+    unzip(filename, exdir = "./raws")
+    file.remove(filename)
+  }  
+}
+
+script <- getURL('http://www.citibikenyc.com/system-data')
+doc <- htmlParse(script)
+links <- getHTMLLinks(doc)
+links <- links[grepl('zip', links)]
+lapply(links, get_data.f)
+```
+
+### Cleaning the Data and Variables Engineering
+
+This code looped through the csv file, loaded them and renamed the columns. In the first iteration of the loop, I calculate the distance between each station using the distm function from the geosphere package. I then added these distances in the main data in order to calculate the speed of the bike (it is important to note that the speed is the maximum speed possible, given that the distance calculated between stations is a straight line even though the bike is not going along this straight line as illustrated in the figure below; the distance between two stations is represented by the black arrow, while three possible bike paths are represented in yellow, purple and pink).
+![bike path](distance.png)
+
+I extracted the date and time, put them in a date format and extracted the month, day, hour, minute, second and day of week. I also calculated the length each bike stays in a given station.
+
+Finally I added Boolean flags to indicate if the bike speed is too fast to be possible, if the start time is during the night (between 9 PM and 6 AM), the weekend, or rush hour (7 to 9 AM and 5 to 7 PM).
+
+```{r, eval=FALSE}
+library(plyr)
+library(dplyr)
+library(geosphere)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(gbm)
+library(caret)
+dir.create(file.path('./data'), showWarnings = FALSE)
+db <- list.files('raws')
+for(i in 1:length(db)){
+  n <- db[i]
+  df <- fread(n)
+  n <- strsplit(n, '[.]')[[1]][1]
+  
+  setnames(df, c('duration', 'starttime', 'stoptime', 'startid', 'startname', 'startlat', 'startlon', 'endid', 'endname', 'endlat', 'endlon', 'bikeid', 'usertype', 'birth', 'gender'))
+  
+  #get a matrix of the distance between stations
+  if(i == 1){
+    station <- df %>% distinct(startid) %>% dplyr::select(as.numeric(startlon), as.numeric(startlat))
+    station <- as.matrix(station)
+    station <- apply(station, 2, as.numeric)
+    dist <- distm(station,  station)
+    rownames(dist) <- colnames(dist) <- unique(df$startid)
+    dist <- as.data.frame(dist)
+    dist$startid <- rownames(dist)
+    mdist <- melt(dist, id = 'startid', variable.name = 'endid', value.name = 'dist')
+    mdist$endid <- as.character(mdist$endid)
+  }
+  #get the distance from the station matrix and match it to the travels
+  df <- as.data.frame(df)
+  df <- left_join(df, mdist)
+  
+  df$speed<- df$dist/as.numeric(df$duration)  
+  
+  #extract year month day hour min sec from date    
+  dates <- as.data.frame(do.call(rbind,strsplit(as.character(df$starttime), ' ')))
+  names(dates) <- c('dates', 'times')
+  d <- do.call(rbind,strsplit(as.character(dates$dates), '-|/'))
+  
+  if(grepl('/',dates$dates[1])){
+    #the last data have a different format for the date so need to transform them
+    d <- d[,c(3,1,2)]
+    df$starttime <-  mdy_hms(df$starttime)
+    df$stoptime <-  mdy_hms(df$stoptime)
+  }else{
+    df$starttime <- ymd_hms(df$starttime)
+    df$stoptime <- ymd_hms(df$stoptime)    
+  }
+  
+  ti <- do.call(rbind,strsplit(as.character(dates$times), ':'))
+  cut_date <- data.frame(d,ti)
+  cut_date <- sapply(cut_date, function(x) as.numeric(as.character(x)))
+  
+  colnames(cut_date) <- c('year', 'month', 'day', 'hour', 'min', 'sec')
+  
+  df$dayofweek <- format(as.Date(as.character(dates[,1])), '%a')
+  bike <- data.frame(df, cut_date)
+  rm(df); rm(dates); rm(d); rm(ti); rm(cut_date) 
+
+  df <- data.frame(bikeid = bike$bikeid, stoptime = bike$stoptime, starttime = bike$starttime)
+  b <- df %>% group_by(bikeid) %>% dplyr::mutate(stay = difftime(stoptime,lead(starttime)))
+  b$bikeid <- as.character(b$bikeid)
+  bike <- left_join(bike, b, by = c('bikeid', 'stoptime'))
+  bike$idx1 <- substring(n, 1,7)
+  bike$idx2 <- 1:dim(bike)[1]
+  bike$toofast <- ifelse(bike$speed > 6, TRUE, FALSE)
+  bike$weekend <- ifelse(bike$dayofweek %in% c('Sat', 'Sun'), TRUE, FALSE)
+  bike$rush <- ifelse(bike$hour %in% c(7,8,9, 17, 18, 19) & bike$weekend == FALSE, TRUE, FALSE)
+  bike$night <- ifelse(bike$hour %in% c(21:23,0:6), TRUE, FALSE)
+  
+  save(bike, file = paste('data/',n, sep =''))
+}
+
+```
+
+### Creating the Training and Test Set
+
+To create the training and test sets, I looped through all the monthly data sets and used the createDataPartition to have balanced sets in terms of bike stations. The sets are thus balanced for both months and stations. I saved them for each month and then bound them together.
+
+```{r, eval=FALSE}
+dir.create(file.path('train'), showWarnings = FALSE)
+dir.create(file.path('test'), showWarnings = FALSE)
+
+df <- list.files('data')
+create_train.f <- function(x){
+  load(paste0('data/',x))
+  idxtrain <- createDataPartition(bike$endid, list = FALSE)
+  train <- bike[idxtrain,]
+  test <- bike[-idxtrain,]
+  save(train, file = paste('train/',x, sep =''))
+  save(test, file = paste('test/',x, sep =''))
+}
+lapply(df, create_train.f)
+
+create_df.f <- function(nm){
+  if(nm == 'train'){
+    train <- lapply(list.files(nm), function(x) {load(paste0(nm, '/',x)); return(train)})
+    train <- do.call(rbind, train)
+    save(train, file = paste0(nm, '/', nm))
+  }else{
+    test <- lapply(list.files(nm), function(x) {load(paste0(nm, '/',x)); return(test)})
+    test <- do.call(rbind, test)
+    save(test, file = paste0(nm, '/', nm))
+  }
+}
+create_df.f('train')
+create_df.f('test')
+```
+
+### Exploring the Data
+
+The train data set is used to explore the data and do some visualization. The users of the Citi Bike system are mostly subscribers and mostly men; the bike usage is the same throughout the week and is a bit lower during the weekend.
+
+```{r, echo = FALSE, warning=FALSE}
+load('train/train')
+user <- data.frame(category = 'user', table(train$usertype))
+gender <- data.frame(category = 'gender', table(train$gender))[-1,]
+day <- data.frame(category = 'day',Var1 = names(table(train$dayofweek)[c(2,6,7,5,1,3,4)]), Freq = table(train$dayofweek)[c(2,6,7,5,1,3,4)])
+df <- rbind(user, gender, day)
+theme_set(theme_bw())
+new_theme = theme_update(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+                         #panel.border = element_border.f(c("left","bottom")),
+                         plot.title = element_text(face="bold", size=16), 
+                         axis.title.x = element_text(size=16),
+                         axis.title.y = element_text(size=16),
+                         axis.text.y = element_text(size=14),
+                         axis.text.x = element_text(size=14),
+                         legend.title = element_blank(), # switch off the legend title
+                         legend.text = element_text(size=16),
+                         legend.key = element_blank() # switch off the rectangle around symbols in the legend
+)
+ggplot(df, aes(x = as.factor(category), y = Freq, fill = factor(Var1))) + geom_bar(stat = 'identity') + scale_fill_manual(values = c('#0a02b1', '#02F6FA', '#027847', '#00FF6E', '#FF78D6', '#410082', '#F70C28','#FC7303', '#EB00D7', '#7500EB', '#BC00EB')) + coord_flip() + xlab('') + ylab('Count') + labs(title = 'Citi Bike Usage')
+```
+
+Speed:
+```{r, echo=FALSE}
+quantile(train$speed, na.rm=T)
+```
+The speed quantile maximum clearly shows that some speed are impossible the maximum is `r quantile(train$speed, na.rm=T)[5]*3.6` m/sec = `r quantile(train$speed, na.rm=T)[5]*3.6` km/hour.
+
+Trip duration:
+```{r, echo=FALSE}
+quantile(as.numeric(train$duration)/60, na.rm=T)
+```
+
+Length of stay in a station:
+```{r, echo=FALSE}
+quantile(as.numeric(train$stay), na.rm=T)
+```
+
+Looking at the stay length we see `r length(which(train$stay < 0))` negative numbers indicating more issues in the data set. These data were removed from the data before modeling.
+
+I sampled 10 % of the training data to visualize them.
+
+```{r, echo=FALSE}
+library(ggplot2)
+options(warn=-1)
+load('forPlotblog')
+theme_set(theme_bw())
+new_theme = theme_update(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+                         #panel.border = element_border.f(c("left","bottom")),
+                         plot.title = element_text(face="bold", size=16), 
+                         axis.title.x = element_text(size=16),
+                         axis.title.y = element_text(size=16, angle=90),
+                         axis.text.y = element_text(size=14),
+                         axis.text.x = element_text(size=14),
+                         legend.title = element_blank(), # switch off the legend title
+                         legend.text = element_text(size=16),
+                         legend.key = element_blank() # switch off the rectangle around symbols in the legend
+)
+ggplot(data = mp, aes(value, colour = dayofweek)) + geom_density(lwd=2)+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)') + labs(title = 'Day of the week influence on length of stay')
+
+ggplot(data = mp, aes(value, colour = as.factor(hour))) + geom_density(lwd=2)+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)')+ labs(title = 'Hour influence on length of stay')
+
+ggplot(data = mp, aes(value, colour = as.factor(month))) + geom_density(lwd=2)+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)')+ labs(title = 'Month influence on length of stay')
+
+ggplot(data = mp, aes(value, colour = endid)) + geom_density()+ scale_x_continuous(limits = c(0, 50))+ xlab('Stay length (min)') + labs(title = 'Station influence on length of stay') + theme(legend.position = "none")
+```
+
+### Binned the Time a Bike Spends in a Station
+
+The main function takes the train or test data set and extracts the month, day, hour, minute and day of week of the beginning of the stay period for each bike. It calls the function is_in.f (see below) to binned the extract whether a bike is in a station at a given time in 10 minute bins.
+
+I added the Boolean weekend, rush hour and night to the data and group the data per month, day, hour, and counted the number of bikes for each station for each time. Then I grouped the data by day of week, in order to decrease the volume of the data, and averaged the number of bikes per station and time. 
+
+```{r, eval=FALSE}
+to_station.f <- function(train, n){
+  train$stay <- as.numeric(train$stay)
+  train  <- train[-which(train$stay < 0),]
+  instat <- train %>% select(endid, stoptime, bikeid, dayofweek, stay)
+  instat <- instat %>% mutate(year = year(stoptime), month = month(stoptime), day = day(stoptime), hour = hour(stoptime), min = minute(stoptime), dayofweek = format(train$stoptime, '%a'))
+  instat <- instat[!is.na(instat$stay),]
+  
+  station <- is_in.f(instat, 10, 3)
+  station$weekend = ifelse(station$dayofweek %in% c('Sat', 'Sun'), TRUE, FALSE)
+  station$rush = ifelse(station$hour %in% c(7,8,9, 17, 18, 19) & station$weekend == FALSE, TRUE, FALSE)
+  station$night = ifelse(station$hour %in% c(21:23,0:6), TRUE, FALSE)
+  
+  st <- apply(station[,c(1,3,6,7,9)], 2, as.numeric)
+  station <- data.frame(station[,c(4,5,8,10:19)], st)
+  mst <- melt(station, id = c(1:7, 14:18), variable.name = 'min_block')  
+ 
+  dmst <- mst %>% group_by(endid, month,day, dayofweek, hour, rush, night, weekend, min_block) %>% dplyr::summarise(count = n(), nbike = sum(value)) 
+  gmst <- dmst %>% group_by(endid, month,hour,  rush, night, weekend, min_block, dayofweek) %>% dplyr::summarise(nday = n(), avgbike = round(mean(nbike)))
+    
+  gmst$endid <- as.factor(gmst$endid)
+  gmst$dayofweek <- as.factor(gmst$dayofweek)
+  t <- apply(gmst[,4:6], 2, as.numeric)
+  gmst[,4:6] <- t
+  
+  return(gmst)
+}
+
+load('train/train')
+gmst <- to_station.f(train, 6)
+save(gmst, file = 'train/train_station')
+
+load('test/test')
+gmst_test <- to_station.f(test, 6)
+save(gmst_test, file = 'test/test_station')
+```
+
+The is_in.f function has the goal of binning the stay time in tm minute bins. First, I took all the rows where the sum of the minute (min) when the bike first arrived in the station (for example if the bike arrived at 10:42, min = 42) and the stay is more than 60 min (for example 30) and converted these rows into two rows, one beginning at the original time (here 42) with a stay time of 60 - 42 = 18 and one beginning at min = 0 and having the stay = original stay - 18 = 12.
+
+Then I took all the rows where the stay time is more than 1440 min (more than a day) and called the change\_days.f function to add rows for each extra day of stay in a station. I did the same with the change_hours.f function for each stay time more than 60 (see below).
+
+After these modifications, the stay time on each row is less than 60 min and can thus be binned.
+
+```{r, eval=FALSE}
+is_in.f <- function(instat, tm, n){
+  # this function binned the stay time in tm min (i used 10 min) but needs to add lines for extra days and hours first. 
+  s <- seq(0,60-tm,tm)
+  names <- paste(s,'+', tm, sep = '')  
+  instat$stay <- round(instat$stay)
+  
+  #change if time bef/ginning in the station +stay > 60 min (so need to change min and add a line....)
+  toolong <- instat[which((instat$stay + instat$min )> 60),]
+  instat_cut <- instat[-which((instat$stay + instat$min )> 60),]
+  toolong2 <- toolong
+  toolong$stay <- with(toolong,  60 - toolong$min)
+  toolong2$stay <- toolong2$stay - toolong$stay
+  toolong2$min <- 0
+  instat_cut <- rbind(instat_cut, toolong, toolong2)
+  
+  #more than a day
+  toolong <- instat_cut[which(instat_cut$stay > 1440),]
+  instat_cut <- instat_cut[-which(instat_cut$stay > 1440),]
+  registerDoParallel(cores=n)
+  tl <- foreach(i = 1:nrow(toolong), .combine = rbind) %dopar%{
+    change_days.f(toolong[i,])
+  }
+  instat_cut$stoptime <- as.character(instat_cut$stoptime)
+  instat_cut <- rbind(instat_cut, tl)
+  
+  toolong <- instat_cut[which(instat_cut$stay > 60),]
+  instat_cut <- instat_cut[-which(instat_cut$stay > 60),]
+
+  registerDoParallel(cores=n)
+  system.time(
+    tl <- foreach(i = 1:nrow(toolong), .combine = rbind) %dopar%{
+      change_hour.f(toolong[i,])
+    })
+  instat_cut <- rbind(instat_cut, tl)  
+  
+  is_in <- matrix(0, dim(instat_cut)[1], length(names))
+  instat_cut$stay <- as.numeric(instat_cut$stay)
+  instat_cut$min <- as.numeric(instat_cut$min)
+  nyes <- round(instat_cut$stay/tm)  
+  begin <- round(instat_cut$min/tm)
+  begin[which(begin == 6)] = 5
+  e <- begin + nyes
+  f <- begin+1
+  change <- which(f>e)
+  e[change] <- 0
+  f[change] <- 0
+  for(i in 1:dim(is_in)[1]){        
+    is_in[i, (f[i]):(e[i])] = 1
+  }
+  colnames(is_in) <- names
+  instat_cut <- data.frame(instat_cut, is_in)
+  
+  return(instat_cut)  
+}
+```
+
+The two functions change\_days.f and change_hours.f are similar. They take a vector of data, look at how many more rows need to be created, create a data frame by replicating imputed vectors and change the value of the day, stay, day of week, hour, month as needed in the newly created rows.
+
+```{r, eval=FALSE}
+change_days.f <- function(t){
+  # this function takes a stay that is longer than a day and adds as many line as necessary to have a stay <= 1440. Adding a line means adding a day in the data where the given bike is at the given station.
+  days = c('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+  nr <- t$stay %/% 1440
+  extra <- ifelse(t$stay%%1440 != 0, 1, 0)
+  y <- as.data.frame(matrix(t, nrow = nr+extra, ncol = 10, byrow = TRUE))
+  names(y) = names(t)
+  y$stay[1:nr] <- 1440
+  if(extra == 1){y$stay[(nr+extra)] <- t$stay%%60}
+  y$day <- unlist(y$day) + 0:(dim(y)[1]-1)
+  nday <- which(days == t$dayofweek)+0:(dim(y)[1]-1)
+  while(any(nday > 7)){
+    nday[which(nday > 7)] <- nday[which(nday > 7)] - 7
+  }
+  y$dayofweek <- days[nday]
+  y$month[which(y$day > days_in_month(t$month))] <- unlist(y$month[which(y$day > days_in_month(t$month))]) +1
+  return(y)
+}
+
+change_hour.f <- function(x){
+  # this function takes a stay that is longer than an hours and adds as many line as necessary to have a hour <= 60. Adding a line means adding an hour in the data where the given bike is at the given station.
+  days = c('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+  x$stay <- as.numeric(x$stay)
+  nr <- x$stay%/%60
+  extra <- ifelse(x$stay%%60 != 0, 1, 0)
+  y <- as.data.frame(matrix(x, nrow = nr+extra, ncol = 10, byrow = TRUE))
+  names(y) = names(x)
+  y$stay[1:nr] <- 60
+  if(extra == 1){y$stay[(nr+extra)] <- x$stay%%60}
+  y$hour <- unlist(y$hour) + 0:(dim(y)[1]-1)
+  y$day[which(y$hour > 23)] <- unlist(y$day[which(y$hour > 23)]) + 1
+  y$dayofweek[which(y$hour > 23)] <- days[which(days == x$dayofweek)+1]
+  y$hour[which(y$hour > 23)] <- y$hour[which(y$hour > 23)] - 24
+  return(y)
+}  
+
+```
+
+With the data binned, a new variable called value is created with a value of 0 if no bikes are at the station in the time bin and 1 if at least one bike is at the station.
+
+```{r,eval=FALSE}
+
+create_binary_y.f <- function(df){
+  gmstbin <- df %>% mutate(value = ifelse(avgbike >=1, 1,0))
+  gmstbin <- gmstbin[,-c(9,10)]
+  return(gmstbin)
+} 
+
+load('train/train_station')
+gmstbin <- create_binary_y.f(gmst)
+save(gmstbin, file = 'train/train_bin')
+
+load('test/test_station')
+gmstbin_test <- create_binary_y.f(gmst_test)
+save(gmstbin_test, file = 'test/test_bin')
+
+```
+
+## Model 
+
+Because the data was so big, I decided to fit a different model for each month. Even taking this approach, the data was still big and I could not fit models over a grid. However, I tried several values for the number of trees, interaction depth and shrinkage and it seems that overall 500 trees with a shrinkage of 0.01 and an interaction depth between 7 and 9 was a good choice.
+
+```{r,eval=FALSE}
+load('train/train_bin')
+load('test/test_bin')
+cmat <- list()
+rmse <- vector()
+monthFit <- list()
+for(i in 1:12){
+  mth <- gmstbin %>% filter(month == i)
+  mth <- mth[,-2]
+  set.seed(97)
+  gbmFit <- gbm(formula = value ~ .,            
+                distribution = "bernoulli", 
+                data = mth,
+                n.trees = 500,              
+                interaction.depth = 9,     
+                shrinkage = 0.1,           
+                verbose = FALSE,
+                cv.folds = 10,
+                n.cores = 4)           
+
+  mtht <- gmstbin_test %>% filter(month == i)
+  mtht <- mtht[,-2]
+  gbmPred <- predict(gbmFit, newdata = mtht, n.trees = 500, type = "response")
+  gbmPred <- ifelse(gbmPred > .5, 1, 0)
+  
+  cmat[[i]] <- confusionMatrix(gbmPred, mtht$value)
+  rmse[i] <- sqrt(mean((mtht$value - gbmPred)^2))
+  monthFit[[i]] <- gbmFit
+  print(i)
+}
+save(monthFit, file = 'monthFit')
+save(rmse, file='rmse_month')
+save(cmat, file = 'month_confmat')
+```
+
+The results of the models are not great. The models are good from May to October but bad for the winter months. I tried tweaking the model to see if I could get a better result; for example, I boosted C5.0, glm and neural network, but none gave me a better result.
+
+## Model Improvement
+
+Looking at the prediction table we can see that there is an important class imbalance for the months where the predictions are bad, which may be the cause of the weak model. I decided to explore a bit more the train data set to see if I there were differences between the winter months and the summer months.
+
+Indeed, we can see that as with the test set, we find the same imbalance with more 0 than 1. Interestingly, there are fewer bike rides taken during the winter months (as expected since we saw earlier that the length a bike stayed in a station was longer) which should translate into more 1’s (at least one bike in the station) than 0’s, when compared to summer months; but, we see the exact opposite. I then wondered if there were fewer bikes in total available; however, that does not seem to be the case. Therefore, it is unclear why I observe this pattern. It could be because of the binning process or it could be because of problem in the original data set (as we know it has issues).
+
+```{r, echo = FALSE}
+library(dplyr, verbose = FALSE)
+load('train/train_bin')
+bins <- gmstbin %>% group_by(month, value) %>% summarise(count = n()) %>% filter(month != 13)
+theme_set(theme_bw())
+new_theme = theme_update(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+                         #panel.border = element_border.f(c("left","bottom")),
+                         plot.title = element_text(face="bold", size=16), 
+                         axis.title.x = element_text(size=16),
+                         axis.title.y = element_text(size=16, angle=90),
+                         axis.text.y = element_text(size=14),
+                         axis.text.x = element_text(size=14),
+                         legend.title = element_blank(), # switch off the legend title
+                         legend.text = element_text(size=16),
+                         legend.key = element_blank() # switch off the rectangle around symbols in the legend
+)
+ggplot(bins,aes(month, count, fill = as.factor(value)))+geom_bar(stat = 'identity') + scale_fill_manual(values = c('#0a02b1', '#02F6FA'))+ xlab('month') + ylab('Number of bikes') + labs(title = 'Is there a bike in the station?')
+mth <- train %>% group_by(year, month) %>% summarise(count = n()) %>% group_by(month) %>% summarise(avg = mean(count))
+
+ggplot(mth, aes(as.factor(month), avg)) + geom_bar(stat = 'identity', fill = '#0a02b1') + xlab('month') + ylab('Number of bike ride') + labs(title = 'Number of Bike Rides per Month')
+
+nbike <- train %>% group_by(year, month, bikeid) %>% summarise(count = n()) %>% group_by(month, bikeid) %>% summarise(avg = mean(count)) %>% group_by(month) %>% summarise(count = n())
+                                                                                                                                                                 
+ggplot(nbike, aes(as.factor(month), count)) + geom_bar(stat = 'identity', fill = '#0a02b1') + xlab('month') + ylab('Number of bikes') + labs(title = 'Number of Bikes per Month')
+
+```
+Nevertheless, to try to fit a better model, I first tried to give a different weight to my two classes. However, the model did not improve, so I decided to upsample my smaller classes in order to have the same number of observations; I did so using the upSample function from the caret package. I then fit a grid of value:
+
+* trees: 100, 300, 500
+* interaction: 5, 7
+* shrinkage: 0.1, 1
+
+I gathered the confusion matrix for each combination and chose the best one depending on the sensitivity and specificity. For memory reasons, I did not save the gbm object when I tried all the combinations so I had to calculate them again.
+
+```{r, eval=FALSE}
+gbmGrid <- expand.grid(interaction.depth = seq(5, 7, by = 2), n.trees = seq(100, 500, by = 200), shrinkage = c(0.1, 1))
+
+library(doParallel)
+cl <- makeCluster(3)
+registerDoParallel(cl)
+cmat <- list()
+for(i in 7:12){
+  mth <- gmstbin %>% filter(month == i)
+  mth <- mth[,-2]
+  mtht <- gmstbin_test %>% filter(month == i)
+  mtht <- mtht[,-2]
+  
+  mthup <- upSample(mth[,1:7], as.factor(mth$value), yname='value')
+  mthup$value <- as.numeric(as.character(mthup$value))
+  
+  perf <- foreach(j = 1:dim(gbmGrid)[1]) %dopar%{
+    library(gbm)
+    library(pROC)
+    library(caret)
+    set.seed(97)    
+    gbmFit <- gbm(formula = value ~ .,            
+                  distribution = "bernoulli", 
+                  data = mthup,
+                  n.trees = gbmGrid$n.trees[j],              
+                  interaction.depth = gbmGrid$interaction.depth[j],  
+                  shrinkage = gbmGrid$shrinkage[j], 
+                  verbose = FALSE,
+                  cv.folds = 10,
+                  n.cores = 3
+                  )  
+    
+    gbm_perf <- gbm.perf(gbmFit, method = "cv", plot.it = FALSE)
+    gbmPred <- predict(gbmFit, newdata = mtht, n.trees = gbm_perf,type = "response")   
+    pred <- ifelse(gbmPred > .5, 1, 0)
+    list(grid = gbmGrid[j,], cmat = confusionMatrix(pred, mtht$value))
+  }
+  cmat[[i]] <- perf
+}
+
+save(cmat, file = 'cmat_grid')
+
+val <- list()
+choice <- list()
+for(i in 1:12){
+  cm <- cmat[[i]]
+  cm <- t(sapply(cm, function(x) t(data.frame(s= unlist(x)[c(1:4, 10,17,18)]))))
+  cm <- apply(cm, 2, as.numeric)
+  if(which.max(cm[,5]) == which.max(cm[,6])){
+    choice[[i]] <- cm[which.max(cm[,5]),]
+    }else if((cm[which.max(cm[,5]),5] - cm[which.max(cm[,6]),5]) > (cm[which.max(cm[,6]),6] - cm[which.max(cm[,5]),6])){
+    choice[[i]] <- cm[which.max(cm[,5]),]
+  }else{
+    choice[[i]] <- cm[which.max(cm[,6]),]
+  }
+  val[[i]] <- cm
+}
+
+choice <- do.call(rbind, choice)
+colnames(choice) <- c('interaction', 'ntrees', 'shrinkage','accuracy', 'sensitivity', 'specificity')
+save(choice, file = 'gbmChoice')
+
+
+## now get the def choice!
+cmat <- list()
+monthFit <- list()
+pdf(file = 'gbmfit.pdf')
+for(i in 1:12){
+  mth <- gmstbin %>% filter(month == i)
+  mth <- mth[,-2]
+  mtht <- gmstbin_test %>% filter(month == i)
+  mtht <- mtht[,-2]
+  mthup <- upSample(mth[,1:7], as.factor(mth$value), yname='value')
+  mthup$value <- as.numeric(as.character(mthup$value))
+  
+  param <- choice[i, ]
+
+  set.seed(97)    
+  gbmFit <- gbm(formula = value ~ .,            #def best for hjuly
+                distribution = "bernoulli", 
+                data = mth,
+                n.trees = param[2],              
+                interaction.depth = param[1],  
+                shrinkage = param[3], 
+                verbose = FALSE,
+                cv.folds = 10,
+                n.cores = 4)   
+  
+  gbm_perf <- gbm.perf(gbmFit, method = "cv")
+  summary(gbmFit)
+  gbmPred <- predict(gbmFit, newdata = mtht, n.trees = gbm_perf,type = "response")
+  pred <- ifelse(gbmPred > .5, 1, 0)
+  
+  cmat[[i]] <- confusionMatrix(pred, mtht$value)
+  
+  monthFit[[i]] <- gbmFit
+  print(i)
+}
+dev.off()
+save(monthFit, file = 'monthFit')
+save(cmat, file = 'month_confmat')
+```
+
+the final results of this models are:
+```{r, echo=FALSE}
+load('gbmChoice')
+choice
+```
+
+Using the upsample function gives better results. However the model is still not great. To improve it, it would be good to incorporate the weather data, the MTA planned worked data, and events data (shows, conventions and so on).
+
+
+
+
+
+
+
+
+
